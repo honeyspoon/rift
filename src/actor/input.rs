@@ -80,6 +80,8 @@ pub struct Input {
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
+    tap_key_events: Cell<u64>,
+    tap_clicks: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     binding_mode_specs: RefCell<BindingModeSpecs>,
     hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
@@ -334,6 +336,8 @@ impl Input {
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
+            tap_key_events: Cell::new(0),
+            tap_clicks: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
             binding_mode_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(Vec::new()),
@@ -682,12 +686,36 @@ impl Input {
         })
     }
 
+    /// Without Input Monitoring the tap still gets clicks but never keys
+    /// (see `sys::accessibility`). Nobody clicks this often without typing.
+    fn note_tap_event(&self, event_type: CGEventType) {
+        const NO_KEYS_CLICK_THRESHOLD: u64 = 50;
+        match event_type {
+            CGEventType::KeyDown | CGEventType::FlagsChanged => {
+                self.tap_key_events.set(self.tap_key_events.get() + 1);
+            }
+            CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                let clicks = self.tap_clicks.get() + 1;
+                self.tap_clicks.set(clicks);
+                if clicks == NO_KEYS_CLICK_THRESHOLD && self.tap_key_events.get() == 0 {
+                    error!(
+                        clicks,
+                        "NO_KEY_EVENTS: the input tap sees clicks but no keys; hotkeys are dead. \
+Check Input Monitoring for rift, then restart it."
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn on_event(
         &self,
         event_type: CGEventType,
         event: &CGEvent,
         proxy: Option<CGEventTapProxy>,
     ) -> bool {
+        self.note_tap_event(event_type);
         if self.mission_control_active.get()
             && matches!(
                 event_type,
