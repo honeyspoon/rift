@@ -5,13 +5,19 @@ use std::time::{Duration, Instant};
 use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
-use tracing::info;
+use tracing::{error, info};
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
 
     static kAXTrustedCheckOptionPrompt: *const c_void;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -86,4 +92,42 @@ pub fn ensure_accessibility_permission() {
     );
 
     std::process::exit(1);
+}
+
+const INPUT_MONITORING_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+fn input_monitoring_granted() -> bool { unsafe { CGPreflightListenEventAccess() } }
+
+fn log_input_monitoring(granted: bool) {
+    if granted {
+        info!("INPUT_MONITORING_GRANTED");
+    } else {
+        error!(
+            "INPUT_MONITORING_MISSING: hotkeys will not work. Allow rift under System Settings > \
+Privacy & Security > Input Monitoring, then restart rift."
+        );
+    }
+}
+
+/// Hotkeys come from an HID-level keyboard tap. Without Input Monitoring macOS
+/// still creates the tap and feeds it mouse events, but never key events, so
+/// nothing fails visibly. Check at startup, ask macOS to list rift in the
+/// Input Monitoring pane if it is missing, and keep watching so a grant lost
+/// while running is logged too.
+pub fn watch_input_monitoring_permission() {
+    let mut granted = input_monitoring_granted();
+    log_input_monitoring(granted);
+    if !granted {
+        unsafe { CGRequestListenEventAccess() };
+    }
+    thread::spawn(move || {
+        loop {
+            thread::sleep(INPUT_MONITORING_POLL_INTERVAL);
+            let now = input_monitoring_granted();
+            if now != granted {
+                log_input_monitoring(now);
+                granted = now;
+            }
+        }
+    });
 }
